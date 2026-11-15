@@ -1,0 +1,15 @@
+[package]
+name = "wsmb-ofx"
+description = "OFX plugin wrapper for WSMB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "wsmb_ofx"
+crate-type = ["cdylib"]
+
+[dependencies]
+wsmb-core = { path = "../wsmb-core" }

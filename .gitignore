@@ -1,0 +1,10 @@
+/target
+/dist
+**/*.rs.bk
+*.pdb
+
+# local scratch
+/scratch
+/out
+*.exr
+*.ppm

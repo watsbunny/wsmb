@@ -1,0 +1,15 @@
+[package]
+name = "wsmb-cli"
+description = "Dev CLI for WSMB: render motion blur between two frames"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "wsmb"
+path = "src/main.rs"
+
+[dependencies]
+wsmb-core = { path = "../wsmb-core" }

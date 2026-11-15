@@ -56,6 +56,8 @@ impl Params {
         p.flow.search_radius = p.flow.search_radius.clamp(1, 32);
         p.flow.block_radius = p.flow.block_radius.clamp(1, 8);
         p.flow.median_passes = p.flow.median_passes.min(8);
+        p.flow.refine_passes = p.flow.refine_passes.clamp(1, 8);
+        p.flow.smooth_passes = p.flow.smooth_passes.min(8);
         p
     }
 }

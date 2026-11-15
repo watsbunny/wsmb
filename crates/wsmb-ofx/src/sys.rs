@@ -336,6 +336,7 @@ pub const kOfxParamPropMax: &str = "OfxParamPropMax";
 pub const kOfxParamPropDisplayMin: &str = "OfxParamPropDisplayMin";
 pub const kOfxParamPropDisplayMax: &str = "OfxParamPropDisplayMax";
 pub const kOfxParamPropAnimates: &str = "OfxParamPropAnimates";
+pub const kOfxParamPropChoiceOption: &str = "OfxParamPropChoiceOption";
 pub const kOfxParamPropIncrement: &str = "OfxParamPropIncrement";
 pub const kOfxParamPropParent: &str = "OfxParamPropParent";
 pub const kOfxParamDoubleTypeScale: &str = "OfxParamDoubleTypeScale";

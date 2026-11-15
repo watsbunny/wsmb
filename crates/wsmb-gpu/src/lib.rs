@@ -352,12 +352,7 @@ mod tests {
 
         let a = smooth_noise(96, 96);
         let b = translate(&a, 5);
-        let opts = FlowOptions {
-            levels: 3,
-            search_radius: 6,
-            block_radius: 1,
-            median_passes: 1,
-        };
+        let opts = FlowOptions { levels: 3, search_radius: 6, ..FlowOptions::default() };
         let forward = dense_flow(&a, &b, &opts);
         let backward = dense_flow(&b, &a, &opts);
 

@@ -101,6 +101,53 @@ impl FlowField {
         out
     }
 
+    /// Separable 5-tap Gaussian, `passes` times.
+    ///
+    /// This is the regularisation step of the coarse-to-fine scheme: smoothing
+    /// the field lets confident motion from textured pixels bleed into flat
+    /// areas, which a block matcher alone can never fill.
+    pub fn smooth(&mut self, passes: u32) {
+        let (w, h) = (self.width, self.height);
+        if w < 3 || h < 3 || passes == 0 {
+            return;
+        }
+        let mut tmp = vec![0.0f32; self.data.len()];
+        for _ in 0..passes {
+            for y in 0..h {
+                for x in 0..w {
+                    let xm2 = x.saturating_sub(2);
+                    let xm1 = x.saturating_sub(1);
+                    let xp1 = (x + 1).min(w - 1);
+                    let xp2 = (x + 2).min(w - 1);
+                    for c in 0..2 {
+                        let s = self.data[(y * w + xm2) * 2 + c]
+                            + 4.0 * self.data[(y * w + xm1) * 2 + c]
+                            + 6.0 * self.data[(y * w + x) * 2 + c]
+                            + 4.0 * self.data[(y * w + xp1) * 2 + c]
+                            + self.data[(y * w + xp2) * 2 + c];
+                        tmp[(y * w + x) * 2 + c] = s * (1.0 / 16.0);
+                    }
+                }
+            }
+            for y in 0..h {
+                let ym2 = y.saturating_sub(2);
+                let ym1 = y.saturating_sub(1);
+                let yp1 = (y + 1).min(h - 1);
+                let yp2 = (y + 2).min(h - 1);
+                for x in 0..w {
+                    for c in 0..2 {
+                        let s = tmp[(ym2 * w + x) * 2 + c]
+                            + 4.0 * tmp[(ym1 * w + x) * 2 + c]
+                            + 6.0 * tmp[(y * w + x) * 2 + c]
+                            + 4.0 * tmp[(yp1 * w + x) * 2 + c]
+                            + tmp[(yp2 * w + x) * 2 + c];
+                        self.data[(y * w + x) * 2 + c] = s * (1.0 / 16.0);
+                    }
+                }
+            }
+        }
+    }
+
     /// 3x3 median filter on each component.
     pub fn median3(&mut self) {
         let (w, h) = (self.width, self.height);
@@ -154,6 +201,10 @@ pub struct FlowOptions {
     pub block_radius: i32,
     /// Median filter passes per level.
     pub median_passes: u32,
+    /// Block-match passes per level: match, smooth, match again.
+    pub refine_passes: u32,
+    /// Gaussian smoothing passes applied to the field between matches.
+    pub smooth_passes: u32,
 }
 
 impl Default for FlowOptions {
@@ -166,6 +217,8 @@ impl Default for FlowOptions {
             search_radius: 8,
             block_radius: 1,
             median_passes: 2,
+            refine_passes: 2,
+            smooth_passes: 2,
         }
     }
 }
@@ -314,26 +367,32 @@ pub fn dense_flow(src: &Frame, dst: &Frame, opts: &FlowOptions) -> FlowField {
     let mut flow: Option<FlowField> = None;
     for level in (0..n).rev() {
         let (w, h) = (pa[level].1, pa[level].2);
-        let pred = flow.as_ref().map(|f| f.resized(w, h));
-        let radius = if level == n - 1 {
+        let search = if level == n - 1 {
             opts.search_radius.max(1)
         } else {
-            1
+            2
         };
 
-        let mut f = block_match(
-            &pa[level].0,
-            &pb[level].0,
-            w,
-            h,
-            pred.as_ref(),
-            radius,
-            opts.block_radius.max(1),
-        );
-        for _ in 0..opts.median_passes {
-            f.median3();
+        let mut current = flow.as_ref().map(|f| f.resized(w, h));
+        for pass in 0..opts.refine_passes.max(1) {
+            let radius = if pass == 0 { search } else { 1 };
+            let mut f = block_match(
+                &pa[level].0,
+                &pb[level].0,
+                w,
+                h,
+                current.as_ref(),
+                radius,
+                opts.block_radius.max(1),
+            );
+            for _ in 0..opts.median_passes {
+                f.median3();
+            }
+            // Regularisation: spread confident motion into flat regions.
+            f.smooth(opts.smooth_passes);
+            current = Some(f);
         }
-        flow = Some(f);
+        flow = current;
     }
 
     let f = flow.expect("pyramid always has at least one level");
@@ -402,6 +461,7 @@ mod tests {
             search_radius: 5,
             block_radius: 1,
             median_passes: 1,
+            ..FlowOptions::default()
         };
         let f = dense_flow(&a, &b, &opts);
 

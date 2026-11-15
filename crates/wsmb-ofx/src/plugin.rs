@@ -19,6 +19,13 @@ const P_OCCLUSION: &str = "occlusion";
 const P_QUALITY: &str = "quality";
 const P_USEGPU: &str = "usegpu";
 const P_FGAMOUNT: &str = "fgamount";
+const P_DISPLAY: &str = "display";
+const P_MATTECH: &str = "mattechannel";
+const P_MATTESHRINK: &str = "matteshrink";
+const P_SENSITIVITY: &str = "sensitivity";
+const P_MAXDISP: &str = "maxdisp";
+const P_VECSCALEX: &str = "vecscalex";
+const P_VECSCALEY: &str = "vecscaley";
 
 const CLIP_MATTE: &str = "Matte";
 const CLIP_VECTORS: &str = "Vectors";
@@ -159,10 +166,30 @@ unsafe fn define_params(s: &crate::host::Suites, set: OfxParamSetHandle) {
     int_param(s, set, P_SAMPLES, "Samples", 16, 1, 64, 1);
     double_param(s, set, P_AMOUNT, "Amount", 1.0, 0.0, 4.0, 0.01);
     double_param(s, set, P_MIX, "Mix", 1.0, 0.0, 1.0, 0.01);
-    double_param(s, set, P_OCCLUSION, "Occlusion", 0.8, 0.0, 1.0, 0.01);
     int_param(s, set, P_QUALITY, "Quality", 2, 1, 4, 1);
     bool_param(s, set, P_USEGPU, "Use GPU", 1);
     double_param(s, set, P_FGAMOUNT, "FG Amount", 1.0, 0.0, 4.0, 0.01);
+    choice_param(
+        s,
+        set,
+        P_DISPLAY,
+        "Display",
+        &["Source Blurred", "Motion Vectors", "Source Unblurred"],
+        0,
+    );
+    choice_param(
+        s,
+        set,
+        P_MATTECH,
+        "Matte Channel",
+        &["Luma", "Red", "Green", "Blue", "Alpha"],
+        0,
+    );
+    double_param(s, set, P_MATTESHRINK, "Matte Shrink", 0.0, 0.0, 16.0, 0.1);
+    double_param(s, set, P_SENSITIVITY, "Sensitivity", 70.0, 0.0, 100.0, 1.0);
+    double_param(s, set, P_MAXDISP, "Max Displacement", 64.0, 4.0, 512.0, 1.0);
+    double_param(s, set, P_VECSCALEX, "Vector Scale X", 1.0, -8.0, 8.0, 0.01);
+    double_param(s, set, P_VECSCALEY, "Vector Scale Y", 1.0, -8.0, 8.0, 0.01);
 }
 
 unsafe fn double_param(
@@ -232,6 +259,35 @@ unsafe fn int_param(
     p.set_int(kOfxParamPropMax, max);
     p.set_int(kOfxParamPropIncrement, increment);
     p.set_int(kOfxParamPropAnimates, 1);
+}
+
+unsafe fn choice_param(
+    s: &crate::host::Suites,
+    set: OfxParamSetHandle,
+    name: &str,
+    label: &str,
+    options: &[&str],
+    default: c_int,
+) {
+    let Some(define) = s.param.paramDefine else { return };
+    let mut props: OfxPropertySetHandle = ptr::null_mut();
+    if define(
+        set,
+        cstr!("OfxParamTypeChoice"),
+        cs(name).as_ptr(),
+        &mut props,
+    ) != kOfxStatOK
+    {
+        return;
+    }
+    let p = Prop(props);
+    p.set_string(kOfxPropType, kOfxTypeParameter);
+    p.set_string(kOfxParamPropType, kOfxParamTypeChoice);
+    p.set_string(kOfxPropName, name);
+    p.set_string(kOfxPropLabel, label);
+    p.set_strings(kOfxParamPropChoiceOption, options);
+    p.set_int(kOfxParamPropDefault, default);
+    p.set_int(kOfxParamPropAnimates, 0);
 }
 
 unsafe fn bool_param(
@@ -425,10 +481,16 @@ struct Values {
     samples: u32,
     amount: f32,
     mix: f32,
-    occlusion: f32,
     quality: i32,
     use_gpu: bool,
     fg_amount: f32,
+    sensitivity: f32,
+    display: i32,
+    matte_channel: i32,
+    matte_shrink: f32,
+    max_disp: f32,
+    vec_scale_x: f32,
+    vec_scale_y: f32,
 }
 
 unsafe fn double_value(set: OfxParamSetHandle, name: &str, time: OfxTime) -> Option<f64> {
@@ -481,26 +543,35 @@ unsafe fn read_values(instance: OfxImageEffectHandle, time: OfxTime) -> Option<V
         samples: i(P_SAMPLES, 16).max(1) as u32,
         amount: d(P_AMOUNT, 1.0) as f32,
         mix: d(P_MIX, 1.0) as f32,
-        occlusion: d(P_OCCLUSION, 0.8) as f32,
         quality: i(P_QUALITY, 2).clamp(1, 4),
         use_gpu: i(P_USEGPU, 1) != 0,
         fg_amount: d(P_FGAMOUNT, 1.0) as f32,
+        sensitivity: d(P_SENSITIVITY, 70.0) as f32,
+        display: i(P_DISPLAY, 0).clamp(0, 2),
+        matte_channel: i(P_MATTECH, 0).clamp(0, 4),
+        matte_shrink: d(P_MATTESHRINK, 0.0) as f32,
+        max_disp: d(P_MAXDISP, 64.0) as f32,
+        vec_scale_x: d(P_VECSCALEX, 1.0) as f32,
+        vec_scale_y: d(P_VECSCALEY, 1.0) as f32,
     })
 }
 
-fn quality_to_flow(quality: i32) -> FlowOptions {
-    // Reachable motion is `search_radius * 2^(levels-1)`.
-    let (levels, search) = match quality {
-        1 => (4, 4),   // ~32 px
-        2 => (5, 8),   // ~128 px
-        3 => (5, 12),  // ~192 px
-        _ => (5, 24),  // ~384 px
+fn flow_options(quality: i32, max_disp: f32) -> FlowOptions {
+    // The pyramid does the heavy lifting: `max_disp` is turned into the search
+    // radius of the coarsest level, and each level doubles the reach.
+    let levels: usize = match quality {
+        1 => 4,
+        _ => 5,
     };
+    let reach = (1u32 << (levels - 1)) as f32;
+    let search = ((max_disp / reach).round() as i32).clamp(1, 32);
     FlowOptions {
         levels,
         search_radius: search,
         block_radius: 1,
         median_passes: 2,
+        refine_passes: 2,
+        smooth_passes: 2,
     }
 }
 
@@ -574,6 +645,11 @@ pub unsafe fn render(
     if !clip_connected(instance, CLIP_VECTORS, &mut vectors_clip) {
         vectors_clip = ptr::null_mut();
     }
+    crate::host::log(&format!(
+        "clips: matte_connected={} vectors_connected={}",
+        !matte_clip.is_null(),
+        !vectors_clip.is_null()
+    ));
 
     let mut out_img: OfxPropertySetHandle = ptr::null_mut();
     if clip_get_image(out_clip, time, ptr::null(), &mut out_img) != kOfxStatOK {
@@ -641,7 +717,17 @@ unsafe fn load_frame(clip: OfxImageClipHandle, time: OfxTime) -> Option<Frame> {
 }
 
 /// Matte mask in `0..1`, resampled onto the output grid.
-unsafe fn load_matte(clip: OfxImageClipHandle, time: OfxTime, w: usize, h: usize) -> Option<Vec<f32>> {
+///
+/// `channel`: 0 luma, 1 red, 2 green, 3 blue, 4 alpha. `shrink` erodes the
+/// mask so foreground motion does not bleed across the edge.
+unsafe fn load_matte(
+    clip: OfxImageClipHandle,
+    time: OfxTime,
+    w: usize,
+    h: usize,
+    channel: i32,
+    shrink: f32,
+) -> Option<Vec<f32>> {
     let f = load_frame(clip, time)?;
     if f.width == 0 || f.height == 0 {
         return None;
@@ -656,10 +742,58 @@ unsafe fn load_matte(clip: OfxImageClipHandle, time: OfxTime, w: usize, h: usize
             let r = f.sample(px, py, 0);
             let g = if f.channels > 1 { f.sample(px, py, 1) } else { r };
             let b = if f.channels > 2 { f.sample(px, py, 2) } else { g };
-            mask[y * w + x] = (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0);
+            let a = if f.channels > 3 { f.sample(px, py, 3) } else { 1.0 };
+            let v = match channel {
+                1 => r,
+                2 => g,
+                3 => b,
+                4 => a,
+                _ => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+            };
+            mask[y * w + x] = v.clamp(0.0, 1.0);
         }
     }
+
+    let radius = shrink.max(0.0).round() as usize;
+    if radius > 0 {
+        erode(&mut mask, w, h, radius);
+    }
     Some(mask)
+}
+
+/// Box-min (erosion) so the matte edge contracts by `radius` pixels.
+fn erode(mask: &mut [f32], w: usize, h: usize, radius: usize) {
+    let src = mask.to_vec();
+    let r = radius as i32;
+    for y in 0..h {
+        for x in 0..w {
+            let mut m = 1.0f32;
+            for dy in -r..=r {
+                let sy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                for dx in -r..=r {
+                    let sx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                    m = m.min(src[sy * w + sx]);
+                }
+            }
+            mask[y * w + x] = m;
+        }
+    }
+}
+
+/// Colour picture of the motion field, for the Display parameter.
+fn flow_view(f: &FlowField) -> Frame {
+    let mut out = Frame::new(f.width, f.height, 4);
+    for y in 0..f.height {
+        for x in 0..f.width {
+            let (u, v) = f.get(x, y);
+            let i = (y * f.width + x) * 4;
+            out.data[i] = (0.5 + u / 64.0).clamp(0.0, 1.0);
+            out.data[i + 1] = (0.5 + v / 64.0).clamp(0.0, 1.0);
+            out.data[i + 2] = 0.5;
+            out.data[i + 3] = 1.0;
+        }
+    }
+    out
 }
 
 /// External motion vectors: red and green carry the displacement in pixels.
@@ -668,6 +802,8 @@ unsafe fn load_vectors(
     time: OfxTime,
     w: usize,
     h: usize,
+    scale_x: f32,
+    scale_y: f32,
 ) -> Option<FlowField> {
     let f = load_frame(clip, time)?;
     if f.width == 0 || f.height == 0 {
@@ -680,8 +816,12 @@ unsafe fn load_vectors(
         for x in 0..w {
             let px = x as f32 * sx;
             let py = y as f32 * sy;
-            let u = f.sample(px, py, 0);
-            let v = if f.channels > 1 { f.sample(px, py, 1) } else { 0.0 };
+            let u = f.sample(px, py, 0) * scale_x;
+            let v = if f.channels > 1 {
+                f.sample(px, py, 1) * scale_y
+            } else {
+                0.0
+            };
             flow.set(x, y, u, v);
         }
     }
@@ -727,7 +867,14 @@ unsafe fn render_into(
     let result = (|| -> Option<Frame> {
         let prev_f = fit(prev.clone(), w, h);
         let next_f = fit(next.clone(), w, h);
-        let matte = load_matte(matte_clip, time, w, h);
+        let matte = load_matte(
+            matte_clip,
+            time,
+            w,
+            h,
+            values.matte_channel,
+            values.matte_shrink,
+        );
         let params = Params {
             t: 0.5,
             shutter: values.shutter,
@@ -735,13 +882,41 @@ unsafe fn render_into(
             amount: values.amount,
             fg_amount: values.fg_amount,
             mix: values.mix,
-            occlusion: values.occlusion,
+            // Sensitivity 100 means "trust the estimate", 0 means "only use
+            // samples the forward/backward check agrees with".
+            occlusion: (1.0 - values.sensitivity / 100.0).clamp(0.0, 1.0),
             color_sigma: 0.15,
-            flow: quality_to_flow(values.quality),
+            flow: flow_options(values.quality, values.max_disp),
         };
 
         // External vectors replace the estimate entirely when the clip is wired.
-        let external = load_vectors(vectors_clip, time, w, h);
+        let external = load_vectors(
+            vectors_clip,
+            time,
+            w,
+            h,
+            values.vec_scale_x,
+            values.vec_scale_y,
+        );
+
+        // Some hosts report an optional clip as connected and hand back a black
+        // image. A field that is zero everywhere while the frames differ cannot
+        // be a real vector pass, so fall back to estimation.
+        let external = external.filter(|v| {
+            let max = v
+                .data
+                .iter()
+                .fold(0.0f32, |m, x| m.max(x.abs()));
+            if max > 1e-4 {
+                return true;
+            }
+            let frames_differ = prev_f
+                .data
+                .iter()
+                .zip(next_f.data.iter())
+                .any(|(a, b)| (a - b).abs() > 1.0 / 512.0);
+            !frames_differ
+        });
         let (forward, backward) = match &external {
             Some(v) => {
                 // Linear motion: the backward field is the negated forward one.
@@ -767,6 +942,25 @@ unsafe fn render_into(
             matte.is_some(),
             external.is_some()
         ));
+
+        // Display 1 shows the field itself, 2 shows the unblurred frame.
+        if values.display == 1 {
+            return Some(flow_view(&forward));
+        }
+        if values.display == 2 {
+            let unblurred = Params {
+                shutter: 0.0,
+                ..params.clone()
+            };
+            return Some(wsmb_core::render_with(
+                &prev_f,
+                &next_f,
+                &forward,
+                &backward,
+                &unblurred,
+                matte.as_deref(),
+            ));
+        }
 
         let blurred = if values.use_gpu {
             wsmb_gpu::global().and_then(|gpu| {

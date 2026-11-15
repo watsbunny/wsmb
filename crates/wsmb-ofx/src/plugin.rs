@@ -15,7 +15,6 @@ const P_SHUTTER: &str = "shutter";
 const P_SAMPLES: &str = "samples";
 const P_AMOUNT: &str = "amount";
 const P_MIX: &str = "mix";
-const P_OCCLUSION: &str = "occlusion";
 const P_QUALITY: &str = "quality";
 const P_USEGPU: &str = "usegpu";
 const P_FGAMOUNT: &str = "fgamount";
@@ -24,6 +23,9 @@ const P_MATTECH: &str = "mattechannel";
 const P_MATTESHRINK: &str = "matteshrink";
 const P_SENSITIVITY: &str = "sensitivity";
 const P_MAXDISP: &str = "maxdisp";
+const P_TRACK: &str = "track";
+const P_IMAGEPREP: &str = "imageprep";
+const P_TRACKRGBA: &str = "trackrgba";
 const P_VECSCALEX: &str = "vecscalex";
 const P_VECSCALEY: &str = "vecscaley";
 
@@ -162,13 +164,10 @@ unsafe fn define_optional_clip(s: &crate::host::Suites, handle: OfxImageEffectHa
 }
 
 unsafe fn define_params(s: &crate::host::Suites, set: OfxParamSetHandle) {
-    double_param(s, set, P_SHUTTER, "Shutter", 0.5, 0.0, 4.0, 0.01);
-    int_param(s, set, P_SAMPLES, "Samples", 16, 1, 64, 1);
-    double_param(s, set, P_AMOUNT, "Amount", 1.0, 0.0, 4.0, 0.01);
-    double_param(s, set, P_MIX, "Mix", 1.0, 0.0, 1.0, 0.01);
-    int_param(s, set, P_QUALITY, "Quality", 2, 1, 4, 1);
-    bool_param(s, set, P_USEGPU, "Use GPU", 1);
-    double_param(s, set, P_FGAMOUNT, "FG Amount", 1.0, 0.0, 4.0, 0.01);
+    // Order and control types follow the layout people already know from
+    // ReelSmart: the three "how" switches first, then the two main knobs, then
+    // the foreground block, then the advanced numbers.
+    choice_param(s, set, P_TRACK, "Track", &["Previous Frame", "Next Frame"], 0);
     choice_param(
         s,
         set,
@@ -177,16 +176,35 @@ unsafe fn define_params(s: &crate::host::Suites, set: OfxParamSetHandle) {
         &["Source Blurred", "Motion Vectors", "Source Unblurred"],
         0,
     );
+    choice_param(s, set, P_USEGPU, "Use GPU", &["OFF", "ON"], 1);
+    choice_param(
+        s,
+        set,
+        P_IMAGEPREP,
+        "Image Prep",
+        &["None", "Gamma Enhance"],
+        0,
+    );
+
+    double_param(s, set, P_AMOUNT, "Blur Amount", 1.0, 0.0, 4.0, 0.01);
+    double_param(s, set, P_SENSITIVITY, "Sensitivity", 70.0, 0.0, 100.0, 1.0);
+
+    double_param(s, set, P_FGAMOUNT, "FG Blur Amount", 1.0, 0.0, 4.0, 0.01);
     choice_param(
         s,
         set,
         P_MATTECH,
-        "Matte Channel",
+        "MAT Use Ch.",
         &["Luma", "Red", "Green", "Blue", "Alpha"],
         0,
     );
-    double_param(s, set, P_MATTESHRINK, "Matte Shrink", 0.0, 0.0, 16.0, 0.1);
-    double_param(s, set, P_SENSITIVITY, "Sensitivity", 70.0, 0.0, 100.0, 1.0);
+    double_param(s, set, P_MATTESHRINK, "FG Inv.Matte Shrink", 0.0, 0.0, 16.0, 0.1);
+    bool_param(s, set, P_TRACKRGBA, "Track RGB+A", 0);
+
+    double_param(s, set, P_SHUTTER, "Shutter (frames)", 1.0, 0.0, 4.0, 0.01);
+    int_param(s, set, P_SAMPLES, "Samples", 16, 1, 64, 1);
+    double_param(s, set, P_MIX, "Mix", 1.0, 0.0, 1.0, 0.01);
+    int_param(s, set, P_QUALITY, "Quality", 2, 1, 4, 1);
     double_param(s, set, P_MAXDISP, "Max Displacement", 64.0, 4.0, 512.0, 1.0);
     double_param(s, set, P_VECSCALEX, "Vector Scale X", 1.0, -8.0, 8.0, 0.01);
     double_param(s, set, P_VECSCALEY, "Vector Scale Y", 1.0, -8.0, 8.0, 0.01);
@@ -491,6 +509,9 @@ struct Values {
     max_disp: f32,
     vec_scale_x: f32,
     vec_scale_y: f32,
+    track: i32,
+    image_prep: i32,
+    track_rgba: bool,
 }
 
 unsafe fn double_value(set: OfxParamSetHandle, name: &str, time: OfxTime) -> Option<f64> {
@@ -553,6 +574,9 @@ unsafe fn read_values(instance: OfxImageEffectHandle, time: OfxTime) -> Option<V
         max_disp: d(P_MAXDISP, 64.0) as f32,
         vec_scale_x: d(P_VECSCALEX, 1.0) as f32,
         vec_scale_y: d(P_VECSCALEY, 1.0) as f32,
+        track: i(P_TRACK, 0).clamp(0, 1),
+        image_prep: i(P_IMAGEPREP, 0).clamp(0, 1),
+        track_rgba: i(P_TRACKRGBA, 0) != 0,
     })
 }
 
@@ -572,6 +596,7 @@ fn flow_options(quality: i32, max_disp: f32) -> FlowOptions {
         median_passes: 2,
         refine_passes: 2,
         smooth_passes: 2,
+        use_alpha: false,
     }
 }
 
@@ -780,6 +805,19 @@ fn erode(mask: &mut [f32], w: usize, h: usize, radius: usize) {
     }
 }
 
+/// Perceptual encode used by the "Gamma Enhance" image prep.
+fn gamma_encode(f: &Frame) -> Frame {
+    let mut out = f.clone();
+    for (i, v) in out.data.iter_mut().enumerate() {
+        // Leave alpha alone.
+        if f.channels == 4 && i % 4 == 3 {
+            continue;
+        }
+        *v = v.max(0.0).powf(1.0 / 2.2);
+    }
+    out
+}
+
 /// Colour picture of the motion field, for the Display parameter.
 fn flow_view(f: &FlowField) -> Frame {
     let mut out = Frame::new(f.width, f.height, 4);
@@ -875,9 +913,19 @@ unsafe fn render_into(
             values.matte_channel,
             values.matte_shrink,
         );
+        // Track picks which half of the two-frame interval the shutter covers:
+        // the first half ends on the current frame, the second starts from it.
+        let (t_center, shutter_norm) = match values.track {
+            0 => (0.25, (values.shutter * 0.5).clamp(0.0, 1.0)),
+            _ => (0.75, (values.shutter * 0.5).clamp(0.0, 1.0)),
+        };
+
+        let mut flow_opts = flow_options(values.quality, values.max_disp);
+        flow_opts.use_alpha = values.track_rgba;
+
         let params = Params {
-            t: 0.5,
-            shutter: values.shutter,
+            t: t_center,
+            shutter: shutter_norm,
             samples: values.samples,
             amount: values.amount,
             fg_amount: values.fg_amount,
@@ -886,7 +934,14 @@ unsafe fn render_into(
             // samples the forward/backward check agrees with".
             occlusion: (1.0 - values.sensitivity / 100.0).clamp(0.0, 1.0),
             color_sigma: 0.15,
-            flow: flow_options(values.quality, values.max_disp),
+            flow: flow_opts,
+        };
+
+        // Gamma Enhance: when the source is linear, track in perceptual space.
+        let (track_prev, track_next) = if values.image_prep == 1 {
+            (gamma_encode(&prev_f), gamma_encode(&next_f))
+        } else {
+            (prev_f.clone(), next_f.clone())
         };
 
         // External vectors replace the estimate entirely when the clip is wired.
@@ -927,8 +982,8 @@ unsafe fn render_into(
                 (v.clone(), back)
             }
             None => (
-                dense_flow(&prev_f, &next_f, &params.flow),
-                dense_flow(&next_f, &prev_f, &params.flow),
+                dense_flow(&track_prev, &track_next, &params.flow),
+                dense_flow(&track_next, &track_prev, &params.flow),
             ),
         };
 
@@ -949,6 +1004,7 @@ unsafe fn render_into(
         }
         if values.display == 2 {
             let unblurred = Params {
+                t: 0.5,
                 shutter: 0.0,
                 ..params.clone()
             };

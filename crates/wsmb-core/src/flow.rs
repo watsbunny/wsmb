@@ -205,6 +205,8 @@ pub struct FlowOptions {
     pub refine_passes: u32,
     /// Gaussian smoothing passes applied to the field between matches.
     pub smooth_passes: u32,
+    /// Blend the alpha channel into the tracking image ("Track RGB+A").
+    pub use_alpha: bool,
 }
 
 impl Default for FlowOptions {
@@ -219,6 +221,7 @@ impl Default for FlowOptions {
             median_passes: 2,
             refine_passes: 2,
             smooth_passes: 2,
+            use_alpha: false,
         }
     }
 }
@@ -333,8 +336,16 @@ fn downscale_luma(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
     (out, nw, nh)
 }
 
-fn pyramid(f: &Frame, levels: usize) -> Vec<(Vec<f32>, usize, usize)> {
-    let mut out = vec![(f.luma(), f.width, f.height)];
+fn pyramid(f: &Frame, levels: usize, use_alpha: bool) -> Vec<(Vec<f32>, usize, usize)> {
+    let mut base = f.luma();
+    if use_alpha && f.channels >= 4 {
+        // Alpha edges are motion evidence too; fold them into the tracking image.
+        for (i, v) in base.iter_mut().enumerate() {
+            let a = f.data[i * f.channels + 3];
+            *v = 0.5 * *v + 0.5 * a;
+        }
+    }
+    let mut out = vec![(base, f.width, f.height)];
     for _ in 1..levels.max(1) {
         let (d, dw, dh) = {
             let last = out.last().expect("pyramid is never empty");
@@ -360,8 +371,8 @@ pub fn dense_flow(src: &Frame, dst: &Frame, opts: &FlowOptions) -> FlowField {
         return FlowField::new(w, h);
     }
 
-    let pa = pyramid(src, opts.levels);
-    let pb = pyramid(dst, opts.levels);
+    let pa = pyramid(src, opts.levels, opts.use_alpha);
+    let pb = pyramid(dst, opts.levels, opts.use_alpha);
     let n = pa.len().min(pb.len());
 
     let mut flow: Option<FlowField> = None;

@@ -128,8 +128,29 @@ cargo run --release -p wsmb-cli -- prev.bmp next.bmp out.bmp --shutter 0.5 --sam
 | `--search` | search radius on the coarsest level | `8` |
 | `--block` | block radius | `1` |
 
-Plugin parameters: `shutter`, `samples`, `amount`, `fgamount`, `mix`,
-`occlusion`, `quality`, `usegpu`. Optional inputs: `Matte`, `Vectors`.
+Plugin parameters, in panel order (matching the layout people know from
+ReelSmart, with the advanced numbers below):
+
+| # | panel | type | notes |
+| --- | --- | --- | --- |
+| 1 | `Track` | popup | Previous Frame / Next Frame — which half of the two-frame interval the shutter covers |
+| 2 | `Display` | popup | Source Blurred / Motion Vectors / Source Unblurred |
+| 3 | `Use GPU` | popup | OFF / ON |
+| 4 | `Image Prep` | popup | None / Gamma Enhance — track in perceptual space |
+| 5 | `Blur Amount` | slider | motion multiplier for the background |
+| 6 | `Sensitivity` | slider | 0–100, how much the estimate is trusted |
+| 7 | `FG Blur Amount` | slider | motion multiplier where the matte is 1 |
+| 8 | `MAT Use Ch.` | popup | Luma / Red / Green / Blue / Alpha |
+| 9 | `FG Inv.Matte Shrink` | slider | erodes the matte, in pixels |
+| 10 | `Track RGB+A` | checkbox | fold alpha into the tracking image |
+| 11 | `Shutter (frames)` | slider | shutter length in frames |
+| 12 | `Samples` | slider | integration samples |
+| 13 | `Mix` | slider | blend with the unblurred frame |
+| 14 | `Quality` | slider | pyramid depth |
+| 15 | `Max Displacement` | slider | reachable motion in pixels |
+| 16–17 | `Vector Scale X/Y` | slider | scale for the external vectors input |
+
+Optional inputs: `Matte`, `Vectors`.
 
 ## Roadmap
 

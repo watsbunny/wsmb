@@ -26,6 +26,7 @@ OPTIONS:
     --mix <f>          blend with the unblurred frame                    [1.0]
     --occlusion <f>    forward/backward consistency weight               [0.8]
     --sigma <f>        bilateral colour sigma, 0 disables                [0.15]
+    --gpu              run the shutter integration on the GPU
     --levels <n>       pyramid levels                                    [4]
     --search <n>       block match radius on the coarsest level          [3]
     --block <n>        block radius                                      [1]
@@ -69,10 +70,12 @@ fn next_i32(it: &mut impl Iterator<Item = String>, flag: &str) -> i32 {
 fn run() -> Result<(), String> {
     let mut params = Params::default();
     let mut positional: Vec<String> = Vec::new();
+    let mut use_gpu = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--gpu" => use_gpu = true,
             "--shutter" => params.shutter = next_f32(&mut it, "--shutter"),
             "--samples" => params.samples = next_usize(&mut it, "--samples") as u32,
             "--amount" => params.amount = next_f32(&mut it, "--amount"),
@@ -117,7 +120,19 @@ fn run() -> Result<(), String> {
     let t1 = Instant::now();
     let bwd = dense_flow(&next, &prev, &params.flow);
     let t2 = Instant::now();
-    let out = render(&prev, &next, &fwd, &bwd, &params);
+    let out = if use_gpu {
+        match wsmb_gpu::global() {
+            Some(gpu) => gpu
+                .render(&prev, &next, &fwd, &bwd, &params, None)
+                .unwrap_or_else(|| render(&prev, &next, &fwd, &bwd, &params)),
+            None => {
+                eprintln!("no GPU adapter, falling back to CPU");
+                render(&prev, &next, &fwd, &bwd, &params)
+            }
+        }
+    } else {
+        render(&prev, &next, &fwd, &bwd, &params)
+    };
     let t3 = Instant::now();
 
     println!("flow fwd: {:>8.1} ms", (t1 - t0).as_secs_f64() * 1e3);

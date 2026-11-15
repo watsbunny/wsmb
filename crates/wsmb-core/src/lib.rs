@@ -18,7 +18,7 @@ pub mod frame;
 pub mod par;
 pub mod params;
 
-pub use blur::render;
+pub use blur::{render, render_with};
 pub use flow::{dense_flow, FlowField, FlowOptions};
 pub use frame::Frame;
 pub use params::Params;

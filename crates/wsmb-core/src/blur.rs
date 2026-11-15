@@ -115,17 +115,28 @@ fn integrate(
     channels: usize,
     shutter: f32,
     samples: usize,
+    matte: Option<&[f32]>,
 ) -> Frame {
     let width = prev.width.min(next.width);
     let height = prev.height.min(next.height);
     let t = p.t;
     let amount = p.amount;
+    let fg_amount = p.fg_amount;
     let t2 = 2.0 * p.color_sigma * p.color_sigma;
 
     let data = rows_out(width, channels, height, |y, row| {
         let yf = y as f32;
         for x in 0..width {
             let xf = x as f32;
+            // The matte picks the motion multiplier per pixel; without one the
+            // whole frame uses `amount`.
+            let amount = match matte {
+                Some(m) => {
+                    let k = m.get(y * width + x).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                    amount * (1.0 - k) + fg_amount * k
+                }
+                None => amount,
+            };
             let (reference, _) = sample_at(prev, next, fwd, bwd, xf, yf, t, amount, channels);
 
             let mut acc = [0.0f32; 4];
@@ -183,11 +194,20 @@ fn integrate(
 /// Render the blurred frame for time `p.t` between `prev` and `next`.
 ///
 /// `fwd` must map `prev` onto `next`, `bwd` must map `next` onto `prev`.
-pub fn render(prev: &Frame, next: &Frame, fwd: &FlowField, bwd: &FlowField, p: &Params) -> Frame {
+/// `matte`, when given, is a `width * height` mask in `0..1` where 1 selects
+/// `p.fg_amount` as the motion multiplier and 0 selects `p.amount`.
+pub fn render_with(
+    prev: &Frame,
+    next: &Frame,
+    fwd: &FlowField,
+    bwd: &FlowField,
+    p: &Params,
+    matte: Option<&[f32]>,
+) -> Frame {
     let p = p.sanitized();
     let channels = prev.channels.max(next.channels).clamp(1, 4);
 
-    let center = integrate(prev, next, fwd, bwd, &p, channels, 0.0, 1);
+    let center = integrate(prev, next, fwd, bwd, &p, channels, 0.0, 1, matte);
 
     if p.amount <= 1e-6 || p.shutter <= 1e-6 || p.samples <= 1 {
         return center;
@@ -202,8 +222,14 @@ pub fn render(prev: &Frame, next: &Frame, fwd: &FlowField, bwd: &FlowField, p: &
         channels,
         p.shutter,
         p.samples as usize,
+        matte,
     );
     center.mix_with(&blurred, p.mix)
+}
+
+/// Render without a matte.
+pub fn render(prev: &Frame, next: &Frame, fwd: &FlowField, bwd: &FlowField, p: &Params) -> Frame {
+    render_with(prev, next, fwd, bwd, p, None)
 }
 
 #[cfg(test)]

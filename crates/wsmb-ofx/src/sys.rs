@@ -308,6 +308,7 @@ pub const kOfxImageEffectSimpleSourceClipName: &str = "Source";
 pub const kOfxImageEffectOutputClipName: &str = "Output";
 
 pub const kOfxImageClipPropOptional: &str = "OfxImageClipPropOptional";
+pub const kOfxImageClipPropConnected: &str = "OfxImageClipPropConnected";
 pub const kOfxImagePropData: &str = "OfxImagePropData";
 pub const kOfxImagePropBounds: &str = "OfxImagePropBounds";
 pub const kOfxImagePropRowBytes: &str = "OfxImagePropRowBytes";

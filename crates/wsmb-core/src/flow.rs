@@ -159,8 +159,11 @@ pub struct FlowOptions {
 impl Default for FlowOptions {
     fn default() -> Self {
         Self {
-            levels: 4,
-            search_radius: 3,
+            levels: 5,
+            // Reachable motion is roughly `search_radius * 2^(levels-1)`, so
+            // this covers ~128 px. The radius only widens the search on the
+            // coarsest level, which is the cheapest one, so it is close to free.
+            search_radius: 8,
             block_radius: 1,
             median_passes: 2,
         }

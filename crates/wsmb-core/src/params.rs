@@ -12,6 +12,8 @@ pub struct Params {
     pub samples: u32,
     /// Global multiplier applied to the estimated motion.
     pub amount: f32,
+    /// Motion multiplier for the area the matte marks as foreground.
+    pub fg_amount: f32,
     /// Blend of the blurred result with the plain interpolated frame, `0..1`.
     pub mix: f32,
     /// Weight of the forward/backward consistency term, `0..1`.
@@ -29,6 +31,7 @@ impl Default for Params {
             shutter: 0.5,
             samples: 16,
             amount: 1.0,
+            fg_amount: 1.0,
             mix: 1.0,
             occlusion: 0.8,
             color_sigma: 0.15,
@@ -45,6 +48,7 @@ impl Params {
         p.shutter = p.shutter.clamp(0.0, 4.0);
         p.samples = p.samples.clamp(1, 256);
         p.amount = p.amount.clamp(0.0, 8.0);
+        p.fg_amount = p.fg_amount.clamp(0.0, 8.0);
         p.mix = p.mix.clamp(0.0, 1.0);
         p.occlusion = p.occlusion.clamp(0.0, 1.0);
         p.color_sigma = p.color_sigma.max(0.0);

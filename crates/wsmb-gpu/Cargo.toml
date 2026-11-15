@@ -1,0 +1,14 @@
+[package]
+name = "wsmb-gpu"
+description = "GPU (Vulkan/DX12 via wgpu) shutter integration for WSMB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wsmb-core = { path = "../wsmb-core" }
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"

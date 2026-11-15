@@ -57,8 +57,15 @@ commercial plugin are used.
 
 Working today:
 
-- dense forward/backward motion estimation with a pyamidal block matcher
+- dense forward/backward motion estimation with a pyramidal block matcher
 - flow-guided shutter integration with occlusion and colour weighting
+- GPU shutter integration through a WGSL compute shader (Vulkan/DX12 via
+  wgpu): 1920×1080 at 24 samples went from 3.2 s to 0.41 s on an RX 6750 XT,
+  matching the CPU result to 1e-7
+- optional `Matte` input: the matte picks the motion multiplier per pixel, so
+  foreground and background can blur by different amounts
+- optional `Vectors` input: red/green carry the displacement in pixels and
+  replace the estimate entirely
 - an OFX 1.4 plugin that EffectCraft 0.24.1 loads, describes and renders
   (`CreateInstance → GetClipPreferences → GetRoD → GetRoI → IsIdentity →
   BeginSequenceRender → Render → EndSequenceRender`)
@@ -67,22 +74,27 @@ Working today:
 Known limits:
 
 - **Search range.** The matcher can see at most `search_radius · 2^(levels-1)`
-  pixels of motion. With the default `4` levels and `3` search that is only
-  24 px; fast motion needs more levels or a bigger radius.
+  pixels of motion: the default 5 levels × 8 search covers ~128 px. A wider
+  radius is nearly free because it only widens the coarsest level.
+- **Flat regions.** A block matcher has nothing to lock onto inside a large
+  uniform area, so its interior keeps the predicted (near zero) motion and
+  barely blurs — only the edges smear. Fixing this needs a smoothness term
+  (flow diffusion or variational refinement), not a bigger block: a 5×5 or 7×7
+  window makes it worse on small frames.
 - **Temporal access.** EffectCraft's OFX helper serves time-invariant clip
   images in headless renders, so blur is not visible there for any plugin
   (RE:Vision's RSMB behaves the same way in the same test). The plugin handles
   it correctly by falling back to "no motion, no blur"; verifying visually
   needs the GUI or a host that honours sub-frame clip access.
-- **CPU only so far.** A 1920×1080 frame with 24 samples takes about 4.5 s.
 
 ## Repository layout
 
 ```
 crates/
   wsmb-core/   pure Rust, no dependencies: frames, flow, blur, params
+  wsmb-gpu/    WGSL compute shader for the shutter integration (wgpu)
   wsmb-cli/    dev CLI, renders blur between two BMPs
-  wsmb-ofx/    OFX plugin (cdylib) — planned
+  wsmb-ofx/    the OFX plugin (cdylib)
 ```
 
 ## Build
@@ -111,18 +123,25 @@ cargo run --release -p wsmb-cli -- prev.bmp next.bmp out.bmp --shutter 0.5 --sam
 | `--mix` | blend with the unblurred frame | `1.0` |
 | `--occlusion` | weight of the consistency term | `0.8` |
 | `--sigma` | bilateral colour sigma, `0` disables | `0.15` |
-| `--levels` | pyramid depth | `4` |
-| `--search` | search radius on the coarsest level | `3` |
+| `--gpu` | run the integration on the GPU | off |
+| `--levels` | pyramid depth | `5` |
+| `--search` | search radius on the coarsest level | `8` |
 | `--block` | block radius | `1` |
+
+Plugin parameters: `shutter`, `samples`, `amount`, `fgamount`, `mix`,
+`occlusion`, `quality`, `usegpu`. Optional inputs: `Matte`, `Vectors`.
 
 ## Roadmap
 
 - [x] Dense forward/backward motion estimation
 - [x] Flow-guided shutter integration with occlusion handling
 - [x] Dev CLI for headless testing
-- [ ] OFX plugin wrapper (`ofxCore`, `ofxImageEffect`, `ofxParam`, `ofxProperty`)
-- [ ] GPU backend (Vulkan compute via `wgpu`, OpenCL fallback)
-- [ ] External motion-vector input, for renders that ship vector passes
+- [x] OFX plugin wrapper (`ofxCore`, `ofxImageEffect`, `ofxParam`, `ofxProperty`)
+- [x] GPU backend (Vulkan/DX12 via `wgpu`) for the shutter integration
+- [x] External motion-vector input, for renders that ship vector passes
+- [x] Foreground/background split driven by a matte
+- [ ] GPU motion estimation (flow is ~60% of the frame time now)
+- [ ] Flow diffusion through flat regions
 - [ ] Multi-frame integration (fetch more than two neighbours from the host)
 - [ ] Half/float pixel formats, tiles and RoD support
 - [ ] Regression suite comparing CPU vs GPU output

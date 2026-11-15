@@ -13,3 +13,4 @@ path = "src/main.rs"
 
 [dependencies]
 wsmb-core = { path = "../wsmb-core" }
+wsmb-gpu = { path = "../wsmb-gpu" }

@@ -6,7 +6,7 @@ use core::ffi::c_int;
 use std::ffi::CString;
 use std::ptr;
 
-use wsmb_core::{dense_flow, FlowOptions, Frame, Params};
+use wsmb_core::{dense_flow, FlowField, FlowOptions, Frame, Params};
 
 pub const PLUGIN_LABEL: &str = "WSMB";
 pub const PLUGIN_LONG_LABEL: &str = "Watsbunny Smart Motion Blur";
@@ -17,6 +17,11 @@ const P_AMOUNT: &str = "amount";
 const P_MIX: &str = "mix";
 const P_OCCLUSION: &str = "occlusion";
 const P_QUALITY: &str = "quality";
+const P_USEGPU: &str = "usegpu";
+const P_FGAMOUNT: &str = "fgamount";
+
+const CLIP_MATTE: &str = "Matte";
+const CLIP_VECTORS: &str = "Vectors";
 
 fn cs(s: &str) -> CString {
     CString::new(s).unwrap_or_default()
@@ -81,6 +86,10 @@ pub unsafe fn describe_in_context(
     if !define_clip(s, handle, kOfxImageEffectOutputClipName, false) {
         return kOfxStatFailed;
     }
+    // Optional sources: a matte that splits foreground from background and a
+    // clip of external motion vectors.
+    define_optional_clip(s, handle, CLIP_MATTE);
+    define_optional_clip(s, handle, CLIP_VECTORS);
 
     let mut param_set: OfxParamSetHandle = ptr::null_mut();
     if let Some(f) = s.effect.getParamSet {
@@ -128,6 +137,23 @@ unsafe fn define_clip(
     true
 }
 
+unsafe fn define_optional_clip(s: &crate::host::Suites, handle: OfxImageEffectHandle, name: &str) {
+    let Some(define) = s.effect.clipDefine else { return };
+    let mut props: OfxPropertySetHandle = ptr::null_mut();
+    if define(handle, cs(name).as_ptr(), &mut props) != kOfxStatOK {
+        return;
+    }
+    let p = Prop(props);
+    p.set_string(kOfxPropType, kOfxTypeClip);
+    p.set_string(kOfxPropName, name);
+    p.set_strings(
+        kOfxImageEffectPropSupportedComponents,
+        &[kOfxImageComponentRGBA, kOfxImageComponentRGB],
+    );
+    p.set_int(kOfxImageClipPropOptional, 1);
+    p.set_int(kOfxImageEffectPropTemporalClipAccess, 0);
+}
+
 unsafe fn define_params(s: &crate::host::Suites, set: OfxParamSetHandle) {
     double_param(s, set, P_SHUTTER, "Shutter", 0.5, 0.0, 4.0, 0.01);
     int_param(s, set, P_SAMPLES, "Samples", 16, 1, 64, 1);
@@ -135,6 +161,8 @@ unsafe fn define_params(s: &crate::host::Suites, set: OfxParamSetHandle) {
     double_param(s, set, P_MIX, "Mix", 1.0, 0.0, 1.0, 0.01);
     double_param(s, set, P_OCCLUSION, "Occlusion", 0.8, 0.0, 1.0, 0.01);
     int_param(s, set, P_QUALITY, "Quality", 2, 1, 4, 1);
+    bool_param(s, set, P_USEGPU, "Use GPU", 1);
+    double_param(s, set, P_FGAMOUNT, "FG Amount", 1.0, 0.0, 4.0, 0.01);
 }
 
 unsafe fn double_param(
@@ -204,6 +232,33 @@ unsafe fn int_param(
     p.set_int(kOfxParamPropMax, max);
     p.set_int(kOfxParamPropIncrement, increment);
     p.set_int(kOfxParamPropAnimates, 1);
+}
+
+unsafe fn bool_param(
+    s: &crate::host::Suites,
+    set: OfxParamSetHandle,
+    name: &str,
+    label: &str,
+    default: c_int,
+) {
+    let Some(define) = s.param.paramDefine else { return };
+    let mut props: OfxPropertySetHandle = ptr::null_mut();
+    if define(
+        set,
+        cstr!("OfxParamTypeBoolean"),
+        cs(name).as_ptr(),
+        &mut props,
+    ) != kOfxStatOK
+    {
+        return;
+    }
+    let p = Prop(props);
+    p.set_string(kOfxPropType, kOfxTypeParameter);
+    p.set_string(kOfxParamPropType, kOfxParamTypeBoolean);
+    p.set_string(kOfxPropName, name);
+    p.set_string(kOfxPropLabel, label);
+    p.set_int(kOfxParamPropDefault, default);
+    p.set_int(kOfxParamPropAnimates, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +427,8 @@ struct Values {
     mix: f32,
     occlusion: f32,
     quality: i32,
+    use_gpu: bool,
+    fg_amount: f32,
 }
 
 unsafe fn double_value(set: OfxParamSetHandle, name: &str, time: OfxTime) -> Option<f64> {
@@ -426,15 +483,18 @@ unsafe fn read_values(instance: OfxImageEffectHandle, time: OfxTime) -> Option<V
         mix: d(P_MIX, 1.0) as f32,
         occlusion: d(P_OCCLUSION, 0.8) as f32,
         quality: i(P_QUALITY, 2).clamp(1, 4),
+        use_gpu: i(P_USEGPU, 1) != 0,
+        fg_amount: d(P_FGAMOUNT, 1.0) as f32,
     })
 }
 
 fn quality_to_flow(quality: i32) -> FlowOptions {
+    // Reachable motion is `search_radius * 2^(levels-1)`.
     let (levels, search) = match quality {
-        1 => (2, 2),
-        2 => (3, 3),
-        3 => (4, 4),
-        _ => (5, 6),
+        1 => (4, 4),   // ~32 px
+        2 => (5, 8),   // ~128 px
+        3 => (5, 12),  // ~192 px
+        _ => (5, 24),  // ~384 px
     };
     FlowOptions {
         levels,
@@ -505,17 +565,57 @@ pub unsafe fn render(
         return kOfxStatFailed;
     }
 
+    // Optional inputs. A missing or disconnected clip is a null handle.
+    let mut matte_clip: OfxImageClipHandle = ptr::null_mut();
+    if !clip_connected(instance, CLIP_MATTE, &mut matte_clip) {
+        matte_clip = ptr::null_mut();
+    }
+    let mut vectors_clip: OfxImageClipHandle = ptr::null_mut();
+    if !clip_connected(instance, CLIP_VECTORS, &mut vectors_clip) {
+        vectors_clip = ptr::null_mut();
+    }
+
     let mut out_img: OfxPropertySetHandle = ptr::null_mut();
     if clip_get_image(out_clip, time, ptr::null(), &mut out_img) != kOfxStatOK {
         return kOfxStatFailed;
     }
 
-    let status = render_into(instance, src_clip, out_img, time);
+    let status = render_into(
+        instance,
+        src_clip,
+        matte_clip,
+        vectors_clip,
+        out_img,
+        time,
+    );
     clip_release(out_img);
     status
 }
 
+/// True when the named optional input has something plugged into it.
+unsafe fn clip_connected(
+    instance: OfxImageEffectHandle,
+    name: &str,
+    out: &mut OfxImageClipHandle,
+) -> bool {
+    let Some(s) = suites() else { return false };
+    let Some(clip_get) = s.effect.clipGetHandle else {
+        return false;
+    };
+    let mut props: OfxPropertySetHandle = ptr::null_mut();
+    if clip_get(instance, cs(name).as_ptr(), out, &mut props) != kOfxStatOK {
+        return false;
+    }
+    Prop(props)
+        .get_int(kOfxImageClipPropConnected)
+        .map(|v| v != 0)
+        .unwrap_or(false)
+}
+
 unsafe fn fetch(clip: OfxImageClipHandle, time: OfxTime) -> Option<OfxPropertySetHandle> {
+    if clip.is_null() {
+        return None;
+    }
     let s = suites()?;
     let mut img: OfxPropertySetHandle = ptr::null_mut();
     let f = s.effect.clipGetImage?;
@@ -530,9 +630,69 @@ unsafe fn fetch(clip: OfxImageClipHandle, time: OfxTime) -> Option<OfxPropertySe
     Some(img)
 }
 
+unsafe fn load_frame(clip: OfxImageClipHandle, time: OfxTime) -> Option<Frame> {
+    let img = fetch(clip, time)?;
+    let view = ImageView::from_handle(img)?;
+    let frame = view.read_frame();
+    if let Some(release) = suites().and_then(|s| s.effect.clipReleaseImage) {
+        release(img);
+    }
+    Some(frame)
+}
+
+/// Matte mask in `0..1`, resampled onto the output grid.
+unsafe fn load_matte(clip: OfxImageClipHandle, time: OfxTime, w: usize, h: usize) -> Option<Vec<f32>> {
+    let f = load_frame(clip, time)?;
+    if f.width == 0 || f.height == 0 {
+        return None;
+    }
+    let mut mask = vec![0.0f32; w * h];
+    let sx = f.width as f32 / w as f32;
+    let sy = f.height as f32 / h as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let px = x as f32 * sx;
+            let py = y as f32 * sy;
+            let r = f.sample(px, py, 0);
+            let g = if f.channels > 1 { f.sample(px, py, 1) } else { r };
+            let b = if f.channels > 2 { f.sample(px, py, 2) } else { g };
+            mask[y * w + x] = (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0);
+        }
+    }
+    Some(mask)
+}
+
+/// External motion vectors: red and green carry the displacement in pixels.
+unsafe fn load_vectors(
+    clip: OfxImageClipHandle,
+    time: OfxTime,
+    w: usize,
+    h: usize,
+) -> Option<FlowField> {
+    let f = load_frame(clip, time)?;
+    if f.width == 0 || f.height == 0 {
+        return None;
+    }
+    let mut flow = FlowField::new(w, h);
+    let sx = f.width as f32 / w as f32;
+    let sy = f.height as f32 / h as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let px = x as f32 * sx;
+            let py = y as f32 * sy;
+            let u = f.sample(px, py, 0);
+            let v = if f.channels > 1 { f.sample(px, py, 1) } else { 0.0 };
+            flow.set(x, y, u, v);
+        }
+    }
+    Some(flow)
+}
+
 unsafe fn render_into(
     instance: OfxImageEffectHandle,
     src_clip: OfxImageClipHandle,
+    matte_clip: OfxImageClipHandle,
+    vectors_clip: OfxImageClipHandle,
     out_img: OfxPropertySetHandle,
     time: OfxTime,
 ) -> OfxStatus {
@@ -567,41 +727,65 @@ unsafe fn render_into(
     let result = (|| -> Option<Frame> {
         let prev_f = fit(prev.clone(), w, h);
         let next_f = fit(next.clone(), w, h);
-        let mean = |f: &Frame| -> f32 {
-            if f.data.is_empty() {
-                return 0.0;
-            }
-            (f.data.iter().map(|v| *v as f64).sum::<f64>() / f.data.len() as f64) as f32
-        };
-        crate::host::log(&format!(
-            "  fetch prev={} next={} mean_prev={:.4} mean_next={:.4}",
-            prev.is_some(),
-            next.is_some(),
-            mean(&prev_f),
-            mean(&next_f)
-        ));
+        let matte = load_matte(matte_clip, time, w, h);
         let params = Params {
             t: 0.5,
             shutter: values.shutter,
             samples: values.samples,
             amount: values.amount,
+            fg_amount: values.fg_amount,
             mix: values.mix,
             occlusion: values.occlusion,
             color_sigma: 0.15,
             flow: quality_to_flow(values.quality),
         };
-        let forward = dense_flow(&prev_f, &next_f, &params.flow);
-        let backward = dense_flow(&next_f, &prev_f, &params.flow);
+
+        // External vectors replace the estimate entirely when the clip is wired.
+        let external = load_vectors(vectors_clip, time, w, h);
+        let (forward, backward) = match &external {
+            Some(v) => {
+                // Linear motion: the backward field is the negated forward one.
+                let mut back = v.clone();
+                for x in back.data.iter_mut() {
+                    *x = -*x;
+                }
+                (v.clone(), back)
+            }
+            None => (
+                dense_flow(&prev_f, &next_f, &params.flow),
+                dense_flow(&next_f, &prev_f, &params.flow),
+            ),
+        };
+
         crate::host::log(&format!(
-            "render {w}x{h} t={time:.3} amount={:.2} shutter={:.2} samples={} motion={:.3}px",
+            "render {w}x{h} t={time:.3} amount={:.2} shutter={:.2} samples={} motion={:.3}px gpu={} matte={} vectors={}",
             params.amount,
             params.shutter,
             params.samples,
-            forward.mean_magnitude()
+            forward.mean_magnitude(),
+            values.use_gpu,
+            matte.is_some(),
+            external.is_some()
         ));
-        Some(wsmb_core::render(
-            &prev_f, &next_f, &forward, &backward, &params,
-        ))
+
+        let blurred = if values.use_gpu {
+            wsmb_gpu::global().and_then(|gpu| {
+                gpu.render(&prev_f, &next_f, &forward, &backward, &params, matte.as_deref())
+            })
+        } else {
+            None
+        };
+        Some(match blurred {
+            Some(f) => f,
+            None => wsmb_core::render_with(
+                &prev_f,
+                &next_f,
+                &forward,
+                &backward,
+                &params,
+                matte.as_deref(),
+            ),
+        })
     })();
 
     if let Some(release) = s.effect.clipReleaseImage {

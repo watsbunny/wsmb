@@ -13,3 +13,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wsmb-core = { path = "../wsmb-core" }
+wsmb-gpu = { path = "../wsmb-gpu" }
